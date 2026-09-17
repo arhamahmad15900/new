@@ -26,13 +26,13 @@ function getAIClient(): GoogleGenAI {
 
 /**
  * 503 UNAVAILABLE / High Demand error retry handler
- * Aggar API high demand ki wajah se 503 error degi, toh yeh function
- * automatically exponential backoff delay (2s -> 4s -> 8s) ke saath retry karega.
+ * Handles automatic retries with exponential backoff (3s -> 6s -> 12s -> 24s)
+ * when Gemini API encounters traffic spikes or high demand.
  */
 async function callGeminiWithRetry<T>(
   apiCallFn: () => Promise<T>,
-  retries: number = 3,
-  delayMs: number = 2000
+  retries: number = 5,
+  delayMs: number = 3000
 ): Promise<T> {
   for (let i = 0; i < retries; i++) {
     try {
@@ -146,13 +146,14 @@ Generation Entropy Token: ${randomEntropyKey}
 Return ONLY a JSON array adhering strictly to the schema.`;
 
         const contentsParts = [...basePdfParts, { text: instructions }];
-        const modelsToTry = ["gemini-3.8-flash", "gemini-3.1-flash-lite"];
+        
+        // Stable production Gemini models with full fallback support
+        const modelsToTry = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
         let resp: any = null;
         let lastError: any = null;
 
         for (const modelName of modelsToTry) {
           try {
-            // High demand 503 error handling retry wrapper
             resp = await callGeminiWithRetry(() =>
               ai.models.generateContent({
                 model: modelName,
@@ -263,38 +264,53 @@ Strict Requirements:
 2. Questions must be strictly based on the official NIELIT O Level R5.1 curriculum (like Examjila and official NIELIT previous year papers).
 3. Do NOT make trick questions with ambiguous answers. Return only valid JSON adhering to the schema.`;
 
-      const response = await callGeminiWithRetry(() =>
-        ai.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: prompt,
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  questionEn: { type: Type.STRING },
-                  questionHi: { type: Type.STRING },
-                  optionsEn: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                  },
-                  optionsHi: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                  },
-                  correctIndex: { type: Type.INTEGER },
-                  explanationEn: { type: Type.STRING },
-                  explanationHi: { type: Type.STRING },
-                  difficulty: { type: Type.STRING, enum: ["easy", "medium", "hard"] }
-                },
-                required: ["questionEn", "optionsEn", "correctIndex", "explanationEn"]
+      const modelsToTry = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
+      let response: any = null;
+      let lastErr: any = null;
+
+      for (const modelName of modelsToTry) {
+        try {
+          response = await callGeminiWithRetry(() =>
+            ai.models.generateContent({
+              model: modelName,
+              contents: prompt,
+              config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      questionEn: { type: Type.STRING },
+                      questionHi: { type: Type.STRING },
+                      optionsEn: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      optionsHi: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      correctIndex: { type: Type.INTEGER },
+                      explanationEn: { type: Type.STRING },
+                      explanationHi: { type: Type.STRING },
+                      difficulty: { type: Type.STRING, enum: ["easy", "medium", "hard"] }
+                    },
+                    required: ["questionEn", "optionsEn", "correctIndex", "explanationEn"]
+                  }
+                }
               }
-            }
-          }
-        })
-      );
+            })
+          );
+          if (response && response.text) break;
+        } catch (err: any) {
+          lastErr = err;
+        }
+      }
+
+      if (!response || !response.text) {
+        throw new Error(lastErr?.message || "Failed to generate AI questions.");
+      }
 
       const parsed = JSON.parse(response.text || "[]");
       return res.json({ success: true, questions: parsed });
