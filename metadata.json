@@ -1,0 +1,7 @@
+{
+  "name": "'O' Level Test Paper Generator",
+  "description": "Generate standard & chapter-wise NIELIT O Level test papers, host and join live synchronized examination sessions with unique Test IDs, and upload PDF study notes to synthesize exam-grade questions with real-time CBT simulation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
