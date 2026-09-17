@@ -6,6 +6,22 @@ import { liveTestStore } from "./server/liveTestManager.js";
 let aiClient: GoogleGenAI | null = null;
 let quotaExhaustedUntil = 0;
 
+const GEMINI_MODELS_TO_TRY = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash"
+];
+
+function getErrorMessage(error: any): string {
+  if (!error) return "Unknown error";
+  if (typeof error?.message === "string") return error.message;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 function getAIClient(): GoogleGenAI {
   if (!aiClient) {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -59,10 +75,22 @@ async function callGeminiWithRetry<T>(
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+  const MAX_PDF_BYTES = 20 * 1024 * 1024;
+  const REQUEST_BODY_LIMIT = "75mb";
 
-  app.use(express.json({ limit: "30mb" }));
-  app.use(express.urlencoded({ limit: "30mb", extended: true }));
+  app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
+  app.use(express.urlencoded({ limit: REQUEST_BODY_LIMIT, extended: true }));
+
+  app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err?.type === "entity.too.large") {
+      return res.status(413).json({
+        success: false,
+        error: "The uploaded PDF/request is too large. Please upload a PDF under 20MB."
+      });
+    }
+    return next(err);
+  });
 
   // Health check
   app.get("/api/health", (_req, res) => {
@@ -92,7 +120,33 @@ async function startServer() {
     try {
       const ai = getAIClient();
 
-      const cleanBase64 = pdfBase64.replace(/^data:application\/pdf;base64,/, "").trim();
+      const cleanBase64 = pdfBase64.replace(/^data:[^;]+;base64,/, "").replace(/\s/g, "");
+      const estimatedPdfBytes = Math.floor((cleanBase64.length * 3) / 4);
+
+      if (estimatedPdfBytes > MAX_PDF_BYTES) {
+        return res.status(413).json({
+          success: false,
+          error: "The uploaded PDF is too large for AI processing. Please upload a PDF under 20MB."
+        });
+      }
+
+      let pdfBuffer: Buffer;
+      try {
+        pdfBuffer = Buffer.from(cleanBase64, "base64");
+      } catch {
+        return res.status(400).json({
+          success: false,
+          error: "The uploaded PDF could not be decoded. Please upload a valid PDF file."
+        });
+      }
+
+      if (pdfBuffer.length < 5 || pdfBuffer.subarray(0, 4).toString("utf8") !== "%PDF") {
+        return res.status(400).json({
+          success: false,
+          error: "The uploaded file is not a valid PDF document. Please upload a readable .pdf file."
+        });
+      }
+
       const basePdfParts = [{
         inlineData: {
           mimeType: "application/pdf",
@@ -147,12 +201,12 @@ Return ONLY a JSON array adhering strictly to the schema.`;
 
         const contentsParts = [...basePdfParts, { text: instructions }];
         
-        // Stable production Gemini models with full fallback support
-        const modelsToTry = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
+        // Stable production Gemini models with full fallback support.
+        // Do not include retired 1.5 model IDs; they return 404 on current Gemini API versions.
         let resp: any = null;
         let lastError: any = null;
 
-        for (const modelName of modelsToTry) {
+        for (const modelName of GEMINI_MODELS_TO_TRY) {
           try {
             resp = await callGeminiWithRetry(() =>
               ai.models.generateContent({
@@ -193,11 +247,12 @@ Return ONLY a JSON array adhering strictly to the schema.`;
             if (resp && resp.text) break;
           } catch (err: any) {
             lastError = err;
+            console.warn(`[Gemini API] ${modelName} failed: ${getErrorMessage(err)}`);
           }
         }
 
         if (!resp || !resp.text) {
-          throw new Error(lastError?.message || "Failed to generate questions from the uploaded PDF notes.");
+          throw new Error(`${getErrorMessage(lastError) || "Failed to generate questions from the uploaded PDF notes."} Tried models: ${GEMINI_MODELS_TO_TRY.join(", ")}`);
         }
 
         const parsed = JSON.parse(resp.text || "[]");
@@ -264,11 +319,10 @@ Strict Requirements:
 2. Questions must be strictly based on the official NIELIT O Level R5.1 curriculum (like Examjila and official NIELIT previous year papers).
 3. Do NOT make trick questions with ambiguous answers. Return only valid JSON adhering to the schema.`;
 
-      const modelsToTry = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
       let response: any = null;
       let lastErr: any = null;
 
-      for (const modelName of modelsToTry) {
+      for (const modelName of GEMINI_MODELS_TO_TRY) {
         try {
           response = await callGeminiWithRetry(() =>
             ai.models.generateContent({
@@ -305,11 +359,12 @@ Strict Requirements:
           if (response && response.text) break;
         } catch (err: any) {
           lastErr = err;
+          console.warn(`[Gemini API] ${modelName} failed: ${getErrorMessage(err)}`);
         }
       }
 
       if (!response || !response.text) {
-        throw new Error(lastErr?.message || "Failed to generate AI questions.");
+        throw new Error(`${getErrorMessage(lastErr) || "Failed to generate AI questions."} Tried models: ${GEMINI_MODELS_TO_TRY.join(", ")}`);
       }
 
       const parsed = JSON.parse(response.text || "[]");

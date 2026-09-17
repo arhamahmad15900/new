@@ -56,8 +56,8 @@ export const PdfReasoningStudio: React.FC<PdfReasoningStudioProps> = ({ onLaunch
       setError('Please select a valid PDF document (.pdf).');
       return;
     }
-    if (file.size > 25 * 1024 * 1024) {
-      setError('File size exceeds 25MB limit. Please upload a smaller PDF notes file.');
+    if (file.size > 20 * 1024 * 1024) {
+      setError('File size exceeds 20MB limit. Please upload a smaller PDF notes file.');
       return;
     }
 
@@ -136,7 +136,13 @@ export const PdfReasoningStudio: React.FC<PdfReasoningStudioProps> = ({ onLaunch
 
       setLoadingStep('Synthesizing bilingual questions, 4-option keys & step-by-step logic deductions...');
 
-      const data = await response.json();
+      const responseText = await response.text();
+      let data: any = {};
+      try {
+        data = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        data = { error: responseText || 'Server returned an unreadable response.' };
+      }
 
       if (!response.ok) {
         throw new Error(data.error || 'Failed to generate reasoning questions.');
@@ -372,7 +378,7 @@ ${q.explanationEn}
                         Click to browse or drag and drop your PDF notes here
                       </p>
                       <p className="text-xs text-slate-400 mt-1">
-                        Supports reasoning study sheets, lecture handouts, and syllabus notes up to 25MB
+                        Supports reasoning study sheets, lecture handouts, and syllabus notes up to 20MB
                       </p>
                     </div>
                   </>
