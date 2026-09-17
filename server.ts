@@ -24,6 +24,39 @@ function getAIClient(): GoogleGenAI {
   return aiClient;
 }
 
+/**
+ * 503 UNAVAILABLE / High Demand error retry handler
+ * Aggar API high demand ki wajah se 503 error degi, toh yeh function
+ * automatically exponential backoff delay (2s -> 4s -> 8s) ke saath retry karega.
+ */
+async function callGeminiWithRetry<T>(
+  apiCallFn: () => Promise<T>,
+  retries: number = 3,
+  delayMs: number = 2000
+): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await apiCallFn();
+    } catch (error: any) {
+      const is503 = 
+        error?.status === 503 || 
+        error?.code === 503 ||
+        error?.message?.includes("503") || 
+        error?.message?.includes("high demand") ||
+        error?.message?.includes("UNAVAILABLE");
+
+      if (is503 && i < retries - 1) {
+        console.warn(`[Gemini API 503] Model busy. Retrying in ${delayMs / 1000}s... (Attempt ${i + 1}/${retries})`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        delayMs *= 2; // Exponential backoff
+      } else {
+        throw error;
+      }
+    }
+  }
+  throw new Error("Max retries reached.");
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -119,40 +152,43 @@ Return ONLY a JSON array adhering strictly to the schema.`;
 
         for (const modelName of modelsToTry) {
           try {
-            resp = await ai.models.generateContent({
-              model: modelName,
-              contents: {
-                parts: contentsParts
-              },
-              config: {
-                temperature: 0.7,
-                responseMimeType: "application/json",
-                responseSchema: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      questionEn: { type: Type.STRING },
-                      questionHi: { type: Type.STRING },
-                      optionsEn: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING }
+            // High demand 503 error handling retry wrapper
+            resp = await callGeminiWithRetry(() =>
+              ai.models.generateContent({
+                model: modelName,
+                contents: {
+                  parts: contentsParts
+                },
+                config: {
+                  temperature: 0.7,
+                  responseMimeType: "application/json",
+                  responseSchema: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        questionEn: { type: Type.STRING },
+                        questionHi: { type: Type.STRING },
+                        optionsEn: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING }
+                        },
+                        optionsHi: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING }
+                        },
+                        correctIndex: { type: Type.INTEGER },
+                        explanationEn: { type: Type.STRING },
+                        explanationHi: { type: Type.STRING },
+                        topic: { type: Type.STRING },
+                        difficulty: { type: Type.STRING }
                       },
-                      optionsHi: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING }
-                      },
-                      correctIndex: { type: Type.INTEGER },
-                      explanationEn: { type: Type.STRING },
-                      explanationHi: { type: Type.STRING },
-                      topic: { type: Type.STRING },
-                      difficulty: { type: Type.STRING }
-                    },
-                    required: ["questionEn", "optionsEn", "correctIndex", "explanationEn", "optionsHi", "questionHi"]
+                      required: ["questionEn", "optionsEn", "correctIndex", "explanationEn", "optionsHi", "questionHi"]
+                    }
                   }
                 }
-              }
-            });
+              })
+            );
             if (resp && resp.text) break;
           } catch (err: any) {
             lastError = err;
@@ -227,36 +263,38 @@ Strict Requirements:
 2. Questions must be strictly based on the official NIELIT O Level R5.1 curriculum (like Examjila and official NIELIT previous year papers).
 3. Do NOT make trick questions with ambiguous answers. Return only valid JSON adhering to the schema.`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                questionEn: { type: Type.STRING },
-                questionHi: { type: Type.STRING },
-                optionsEn: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
+      const response = await callGeminiWithRetry(() =>
+        ai.models.generateContent({
+          model: "gemini-3.8-flash",
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  questionEn: { type: Type.STRING },
+                  questionHi: { type: Type.STRING },
+                  optionsEn: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  optionsHi: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  correctIndex: { type: Type.INTEGER },
+                  explanationEn: { type: Type.STRING },
+                  explanationHi: { type: Type.STRING },
+                  difficulty: { type: Type.STRING, enum: ["easy", "medium", "hard"] }
                 },
-                optionsHi: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                },
-                correctIndex: { type: Type.INTEGER },
-                explanationEn: { type: Type.STRING },
-                explanationHi: { type: Type.STRING },
-                difficulty: { type: Type.STRING, enum: ["easy", "medium", "hard"] }
-              },
-              required: ["questionEn", "optionsEn", "correctIndex", "explanationEn"]
+                required: ["questionEn", "optionsEn", "correctIndex", "explanationEn"]
+              }
             }
           }
-        }
-      });
+        })
+      );
 
       const parsed = JSON.parse(response.text || "[]");
       return res.json({ success: true, questions: parsed });
